@@ -21,6 +21,7 @@ fn visible_events(screen: &Screen) -> Vec<crate::Event> {
                 .iter()
                 .filter(|e| {
                     !e.task
+                        || e.task_date.is_some()
                         || !screen.completed.contains(&e.task_id())
                         || screen.completed_until.contains_key(&e.task_id())
                 })
@@ -44,7 +45,7 @@ pub fn expire_completed(screen: &mut Screen, now: i64) -> Result<()> {
             screen.selection.day.unwrap_or(view.today),
             view.config.timezone,
         );
-        let pages = render::tasks(&events)
+        let pages = render::sidebar_tasks(&events, screen.selection.day.unwrap_or(view.today))
             .len()
             .div_ceil(layout.task_limit)
             .max(1);
@@ -98,11 +99,16 @@ pub fn redraw(screen: &mut Screen) -> Result<()> {
     let Some(view) = screen.view.as_ref() else {
         return Ok(());
     };
-    let hidden_tasks = screen
-        .completed
+    let hidden_tasks = view
+        .events
         .iter()
-        .filter(|id| !screen.completed_until.contains_key(*id))
-        .cloned()
+        .filter(|e| {
+            e.task
+                && e.task_date.is_none()
+                && screen.completed.contains(&e.task_id())
+                && !screen.completed_until.contains_key(&e.task_id())
+        })
+        .map(crate::Event::task_id)
         .collect();
     let svg = render::svg(
         &view.events,
@@ -169,23 +175,28 @@ pub fn tasks(screen: &Screen) -> Vec<Task> {
         view.config.timezone,
     );
     let events = visible_events(screen);
-    render::task_page(&events, screen.selection.task_page, layout.task_limit)
-        .into_iter()
-        .enumerate()
-        .map(|(i, e)| {
-            let id = e.task_id();
-            let completed = screen.completed.contains(&id);
-            Task {
-                id,
-                title: e.title.clone(),
-                completed,
-                x: render::TASK_X,
-                y: layout.task_top + i as i32 * render::TASK_HEIGHT,
-                width: 356,
-                height: render::TASK_HEIGHT,
-            }
-        })
-        .collect()
+    render::task_page(
+        &events,
+        screen.selection.day.unwrap_or(view.today),
+        screen.selection.task_page,
+        layout.task_limit,
+    )
+    .into_iter()
+    .enumerate()
+    .map(|(i, e)| {
+        let id = e.task_id();
+        let completed = screen.completed.contains(&id);
+        Task {
+            id,
+            title: e.title.clone(),
+            completed,
+            x: render::TASK_X,
+            y: layout.task_top + i as i32 * render::TASK_HEIGHT,
+            width: 356,
+            height: render::TASK_HEIGHT,
+        }
+    })
+    .collect()
 }
 pub fn set_completed(screen: &mut Screen, id: &str, completed: bool) -> Result<bool> {
     activity(screen);
@@ -341,13 +352,14 @@ pub fn tap(screen: &mut Screen, x: i32, y: i32) -> Result<()> {
     let agenda_pages = render::agenda_pages(&view.events, day, view.config.timezone).len();
     let layout = render::sidebar_layout(&view.events, day, view.config.timezone);
     let visible = visible_events(screen);
-    let task_pages = render::tasks(&visible)
+    let task_pages = render::sidebar_tasks(&visible, day)
         .len()
         .div_ceil(layout.task_limit)
         .max(1);
     match control.action {
         render::Action::Day(day) => {
             screen.selection.day = Some(day);
+            screen.selection.task_page = 0;
             screen.selection.agenda_page = 0;
             screen.selection.detail = None;
         }
@@ -363,6 +375,7 @@ pub fn tap(screen: &mut Screen, x: i32, y: i32) -> Result<()> {
             screen.selection.month = None;
             screen.wake.notify_one();
             screen.selection.day = None;
+            screen.selection.task_page = 0;
             screen.selection.agenda_page = 0;
             screen.selection.detail = None;
         }
@@ -418,8 +431,7 @@ pub fn context_controls(screen: &Screen) -> Vec<render::Control> {
         return Vec::new();
     };
     let month = screen.selection.month.unwrap_or(view.today);
-    let mut out = render::calendar_task_controls(&view.events, month, view.config.timezone);
-    out.extend(render::controls(month));
+    let mut out = render::controls(month);
     let day = screen.selection.day.unwrap_or(view.today);
     let layout = render::sidebar_layout(&view.events, day, view.config.timezone);
     if screen.selection.detail.is_none() {
@@ -431,7 +443,7 @@ pub fn context_controls(screen: &Screen) -> Vec<render::Control> {
                 "события",
             ));
         }
-        if render::tasks(&visible_events(screen)).len() > layout.task_limit {
+        if render::sidebar_tasks(&visible_events(screen), day).len() > layout.task_limit {
             out.extend(render::paging_controls(
                 layout.task_header,
                 render::Action::TasksPrevious,
@@ -632,7 +644,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(cache);
     }
     #[test]
-    fn calendar_task_tap_matches_row_and_completion_is_shared_with_sidebar() {
+    fn calendar_task_tap_selects_day_and_only_sidebar_changes_completion() {
         let mut config: crate::Config = crate::test_config();
         let cache =
             std::env::temp_dir().join(format!("paper-calendar-cell-{}", std::process::id()));
@@ -659,32 +671,35 @@ mod tests {
             }),
             ..Screen::default()
         };
+        assert_eq!(tasks(&screen).len(), 1); // Only the undated task belongs to today's sidebar.
+        assert!(!tasks(&screen)
+            .iter()
+            .any(|t| t.id == first || t.id == second));
         let controls = context_controls(&screen);
-        let cells: Vec<_> = controls
+        assert!(!controls
             .iter()
-            .filter(|c| matches!(c.action, render::Action::Toggle(_)))
-            .collect();
-        assert_eq!(cells.len(), 2);
-        assert!(cells.iter().all(|c| c.x < 1455 && c.height >= 38));
-        let target = cells
+            .any(|c| c.x < 1455 && matches!(c.action, render::Action::Toggle(_))));
+        let cell = controls
             .iter()
-            .find(|c| matches!(&c.action,render::Action::Toggle(id) if *id==first))
+            .find(|c| c.label == day.format("%d.%m.%Y").to_string())
             .unwrap();
-        let (x, y) = (target.x + target.width - 10, target.y + target.height / 2);
+        let (x, y) = (cell.x + 23, cell.y + 85);
         tap(&mut screen, x, y).unwrap();
-        assert!(screen.completed.contains(&first));
+        assert_eq!(screen.selection.day, Some(day));
+        assert!(!screen.completed.contains(&first));
         assert!(!screen.completed.contains(&second));
-        assert!(screen.selection.day.is_none()); // Day selection must not steal the tap.
-        assert!(tasks(&screen).iter().any(|t| t.id == first && t.completed));
+        assert!(screen.outbox.is_empty());
+        let row = tasks(&screen).into_iter().find(|t| t.id == first).unwrap();
+        tap(&mut screen, row.x + 20, row.y + 20).unwrap();
+        assert!(screen.completed.contains(&first));
+        tap(&mut screen, x, y).unwrap();
+        assert!(screen.completed.contains(&first)); // Clicking the same calendar task cannot undo it.
         let deadline = screen.completed_until[&first];
         expire_completed(&mut screen, deadline).unwrap();
-        assert!(!tasks(&screen).iter().any(|t| t.id == first));
-        assert!(context_controls(&screen)
-            .iter()
-            .any(|c| matches!(&c.action,render::Action::Toggle(id) if *id==first)));
-        tap(&mut screen, x, y).unwrap(); // Calendar retains checked task and can undo later.
+        assert!(tasks(&screen).iter().any(|t| t.id == first && t.completed)); // Undo remains available on the right.
+        let row = tasks(&screen).into_iter().find(|t| t.id == first).unwrap();
+        tap(&mut screen, row.x + 20, row.y + 20).unwrap();
         assert!(!screen.completed.contains(&first));
-        assert!(tasks(&screen).iter().any(|t| t.id == first && !t.completed));
         let _ = std::fs::remove_dir_all(cache);
     }
     #[test]
@@ -695,7 +710,10 @@ mod tests {
         std::fs::create_dir_all(&cache).unwrap();
         config.cache_dir = cache.clone();
         let today = chrono::NaiveDate::from_ymd_opt(2026, 10, 1).unwrap();
-        let events = crate::demo_events(today, config.timezone);
+        let mut events = crate::demo_events(today, config.timezone);
+        for event in events.iter_mut().filter(|e| e.task) {
+            event.task_date = None;
+        }
         let mut screen = Screen {
             view: Some(crate::View {
                 events,
@@ -786,7 +804,10 @@ mod tests {
     fn details_are_only_for_timed_events_and_tasks_fill_five_rows() {
         let config: crate::Config = crate::test_config();
         let today = chrono::NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();
-        let events = crate::demo_events(today, config.timezone);
+        let mut events = crate::demo_events(today, config.timezone);
+        for event in events.iter_mut().filter(|e| e.task) {
+            event.task_date = None;
+        }
         let screen = Screen {
             view: Some(crate::View {
                 events: events.clone(),
@@ -819,7 +840,7 @@ mod tests {
         assert_eq!(first[0].y, 760);
         assert_eq!(first[4].y, 1192);
         assert!(first.iter().all(|t| t.width >= 300));
-        let second = render::task_page(&events, 1, 5);
+        let second = render::task_page(&events, today, 1, 5);
         assert_eq!(second.len(), 2);
         assert!(second
             .iter()

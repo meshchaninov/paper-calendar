@@ -124,15 +124,21 @@ pub fn tasks(events: &[Event]) -> Vec<&Event> {
     });
     out
 }
-pub fn task_page(events: &[Event], page: usize, limit: usize) -> Vec<&Event> {
-    let all = tasks(events);
+pub fn sidebar_tasks(events: &[Event], day: NaiveDate) -> Vec<&Event> {
+    tasks(events)
+        .into_iter()
+        .filter(|e| e.task_date.is_none() || e.task_date == Some(day))
+        .collect()
+}
+pub fn task_page(events: &[Event], day: NaiveDate, page: usize, limit: usize) -> Vec<&Event> {
+    let all = sidebar_tasks(events, day);
     let pages = all.len().div_ceil(limit).max(1);
     all.into_iter()
         .skip((page % pages) * limit)
         .take(limit)
         .collect()
 }
-// The same rows drive text placement and tap targets inside a day cell.
+// Calendar preview rows. Every part of a cell selects its day; only the sidebar toggles tasks.
 fn cell_rows(events: &[Event], day: NaiveDate, tz: chrono_tz::Tz) -> Vec<&Event> {
     let agenda = day_events(events, day, tz);
     let capacity = if agenda.iter().any(|e| e.all_day) {
@@ -152,37 +158,6 @@ fn cell_rows(events: &[Event], day: NaiveDate, tz: chrono_tz::Tz) -> Vec<&Event>
         .collect();
     rows.extend(timed.into_iter().take(capacity - rows.len()));
     rows
-}
-pub fn calendar_task_controls(
-    events: &[Event],
-    month: NaiveDate,
-    tz: chrono_tz::Tz,
-) -> Vec<Control> {
-    let start = month_range(month).0;
-    let mut controls = Vec::new();
-    for i in 0..42 {
-        let day = start + Duration::days(i);
-        let base = if day_events(events, day, tz).iter().any(|e| e.all_day) {
-            106
-        } else {
-            66
-        };
-        for (row, event) in cell_rows(events, day, tz)
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| e.task)
-        {
-            controls.push(Control {
-                label: format!("Выполнить: {}", event.title),
-                x: 42 + (i % 7) as i32 * 199,
-                y: 130 + (i / 7) as i32 * 198 + base + row as i32 * 38,
-                width: 187,
-                height: 38,
-                action: Action::Toggle(event.task_id()),
-            });
-        }
-    }
-    controls
 }
 pub fn day_events(events: &[Event], day: NaiveDate, tz: chrono_tz::Tz) -> Vec<&Event> {
     let from = tz
@@ -713,16 +688,21 @@ pub fn svg(
             .filter(|e| !e.task || !state.hidden_tasks.contains(&e.task_id()))
             .cloned()
             .collect();
-        let task_count = tasks(&task_events).len();
+        let task_count = sidebar_tasks(&task_events, selected).len();
         pager(
             &mut s,
             layout.task_header,
             state.selection.task_page,
             task_count.div_ceil(layout.task_limit).max(1),
         );
-        for (i, e) in task_page(&task_events, state.selection.task_page, layout.task_limit)
-            .iter()
-            .enumerate()
+        for (i, e) in task_page(
+            &task_events,
+            selected,
+            state.selection.task_page,
+            layout.task_limit,
+        )
+        .iter()
+        .enumerate()
         {
             let y = layout.task_top + i as i32 * TASK_HEIGHT;
             let done = state.completed.contains(&e.task_id());

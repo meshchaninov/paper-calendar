@@ -121,7 +121,7 @@ with tempfile.TemporaryDirectory() as tmp:
         process=subprocess.Popen(command,env=env,stdout=subprocess.DEVNULL)
         wait(ready)
         assert get('/status')['pending_task_updates']==1
-        assert not any(t['id']==ident for t in get('/tasks'))
+        assert any(t['id']==ident and t['completed'] for t in get('/tasks'))
         FAIL=False; refresh()
         wait(lambda:'STATUS:COMPLETED' in ICS and empty())
         print('PASS: durable offline outbox survives restart and sends when online')

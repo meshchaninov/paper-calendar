@@ -94,14 +94,23 @@ with tempfile.TemporaryDirectory() as tmp:
         task = tasks[0]
         completed_id = task['id']
         assert task['width'] >= 300 and task['height'] >= 100
-        cell=next(c for c in json.load(get(base,'/controls')) if c['label']=='Выполнить: Заказать продукты')
-        assert cell['x']<1455 and cell['height']>=38
-        request = urllib.request.Request(base+'/tap',data=json.dumps({'x':cell['x']+cell['width']//2,'y':cell['y']+cell['height']//2}).encode(),headers={'Content-Type':'application/json'},method='POST')
-        assert urllib.request.urlopen(request).status == 204
-        assert json.load(get(base,'/tasks'))[0]['completed']
-        assert get(base,'/calendar.png').headers['ETag'] != etag
-        etag = get(base,'/calendar.png').headers['ETag']
-        print('PASS: dated task in calendar cell toggles completion shared with sidebar')
+        controls=json.load(get(base,'/controls'))
+        assert not any(c['label'].startswith('Выполнить:') for c in controls)
+        cell=next(c for c in controls if c['label']==datetime.datetime.strptime(TODAY,'%Y%m%d').strftime('%d.%m.%Y'))
+        def press(x,y):
+            request=urllib.request.Request(base+'/tap',data=json.dumps(dict(x=x,y=y)).encode(),headers={'Content-Type':'application/json'},method='POST')
+            assert urllib.request.urlopen(request).status==204
+        press(cell['x']+23,cell['y']+85)
+        assert not next(t for t in json.load(get(base,'/tasks')) if t['id']==completed_id)['completed']
+        press(task['x']+20,task['y']+20)
+        assert next(t for t in json.load(get(base,'/tasks')) if t['id']==completed_id)['completed']
+        press(cell['x']+23,cell['y']+85)
+        assert next(t for t in json.load(get(base,'/tasks')) if t['id']==completed_id)['completed']
+        controls=json.load(get(base,'/controls'))
+        press_control=next(c for c in controls if c['label']=='Сегодня')
+        press(press_control['x']+10,press_control['y']+10)
+        etag=get(base,'/calendar.png').headers['ETag']
+        print('PASS: calendar task taps select day without changing completion; sidebar toggles it')
         controls = json.load(get(base,'/controls'))
         before = (tmp/'cache/calendar.png').read_bytes()
         assert not any(c['label']=='Открыть: Заказать продукты' for c in controls)
@@ -181,17 +190,18 @@ with tempfile.TemporaryDirectory() as tmp:
         else: raise AssertionError('Calendar did not return to today after 30 idle seconds')
         print('PASS: 30 seconds without interaction restores today and its agenda')
         before_ids=[t['id'] for t in json.load(get(base,'/tasks'))]
-        request=urllib.request.Request(base+'/tasks/complete',data=json.dumps({'id':completed_id,'completed':True}).encode(),headers={'Content-Type':'application/json'},method='POST')
+        hidden_id=next(ident for ident in before_ids if ident!=completed_id)
+        request=urllib.request.Request(base+'/tasks/complete',data=json.dumps({'id':hidden_id,'completed':True}).encode(),headers={'Content-Type':'application/json'},method='POST')
         assert urllib.request.urlopen(request).status==204
-        assert any(t['id']==completed_id and t['completed'] for t in json.load(get(base,'/tasks')))
+        assert any(t['id']==hidden_id and t['completed'] for t in json.load(get(base,'/tasks')))
         for _ in range(340):
             visible=json.load(get(base,'/tasks'))
-            if not any(t['id']==completed_id for t in visible): break
+            if not any(t['id']==hidden_id for t in visible): break
             time.sleep(.1)
         else: raise AssertionError('Completed task was not hidden after 30 seconds')
         assert len(visible)==5
-        assert visible[0]['id']==before_ids[1]
-        assert completed_id in json.loads((tmp/'cache/completed-tasks.json').read_text())
+        assert [t['id'] for t in visible[:4]]==[ident for ident in before_ids if ident!=hidden_id]
+        assert hidden_id in json.loads((tmp/'cache/completed-tasks.json').read_text())
         print('PASS: completed task stays checked briefly, then disappears and next task fills its place')
     finally:
         process.terminate(); process.wait(timeout=5)
@@ -201,10 +211,10 @@ with tempfile.TemporaryDirectory() as tmp:
         status = wait_ready(base)
         assert status['sync_error'] and status['last_success']
         task = json.load(get(base,'/tasks'))[0]
-        assert not any(t['id']==completed_id for t in json.load(get(base,'/tasks')))
-        request = urllib.request.Request(base+'/tasks/complete',data=json.dumps({'id':completed_id,'completed':False}).encode(),headers={'Content-Type':'application/json'},method='POST')
+        assert not any(t['id']==hidden_id for t in json.load(get(base,'/tasks')))
+        request = urllib.request.Request(base+'/tasks/complete',data=json.dumps({'id':hidden_id,'completed':False}).encode(),headers={'Content-Type':'application/json'},method='POST')
         assert urllib.request.urlopen(request).status == 204
-        assert any(t['id']==completed_id and not t['completed'] for t in json.load(get(base,'/tasks')))
+        assert any(t['id']==hidden_id and not t['completed'] for t in json.load(get(base,'/tasks')))
         print('PASS: hidden completion survives restart and can be undone offline')
         assert 'Проверка CalDAV' in (tmp/'cache/calendar.svg').read_text()
         assert 'Проверка CalDAV & Rust' in [e['title'] for e in json.loads((tmp/'cache/events.json').read_text())['events']]
