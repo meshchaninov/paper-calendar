@@ -599,7 +599,7 @@ pub fn svg(
                 let x = 44 + col as i32 * 199;
                 let y = 200 + row as i32 * 198;
                 let width = (end - col) as i32 * 199 - 16;
-                rect(&mut s, x, y, width, 31, "#d6d6d6");
+                write!(s, r##"<rect x="{x}" y="{y}" width="{width}" height="31" rx="5" fill="white" stroke="#333333" stroke-width="2"/>"##).unwrap();
                 text(
                     &mut s,
                     x + 8,
