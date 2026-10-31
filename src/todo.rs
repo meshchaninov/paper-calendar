@@ -532,9 +532,9 @@ pub fn context_controls(screen: &Screen) -> Vec<render::Control> {
             add(
                 format!("Открыть: {}", row.event.title),
                 1480,
-                if row.event.all_day { row.y } else { row.y - 28 },
+                row.top(),
                 356,
-                if row.event.all_day { 68 } else { 50 },
+                row.hit_height(),
                 render::Action::Open(row.event.detail_id()),
             );
         }
@@ -569,6 +569,47 @@ pub async fn handle_tap(State(shared): State<Shared>, Json(body): Json<Tap>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn last_line_of_wrapped_agenda_title_opens_the_correct_event() {
+        let mut config = crate::test_config();
+        let cache =
+            std::env::temp_dir().join(format!("paper-calendar-wrapped-{}", std::process::id()));
+        std::fs::create_dir_all(&cache).unwrap();
+        config.cache_dir = cache.clone();
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();
+        let mut events: Vec<_> = crate::demo_events(today, config.timezone)
+            .into_iter()
+            .filter(|e| {
+                !e.task
+                    && !e.all_day
+                    && e.start.with_timezone(&config.timezone).date_naive() == today
+            })
+            .take(2)
+            .collect();
+        events[0].title =
+            "Обсуждение планов команды и подготовка большого проекта к следующему рабочему месяцу"
+                .into();
+        let id = events[0].detail_id();
+        let row = render::agenda_pages(&events, today, config.timezone)[0][0].clone();
+        assert_eq!(row.lines.len(), 5);
+        let y = row.y + 4 * render::AGENDA_LINE_HEIGHT;
+        let mut screen = Screen {
+            view: Some(crate::View {
+                events,
+                today,
+                config,
+            }),
+            ..Screen::default()
+        };
+        let control = context_controls(&screen)
+            .into_iter()
+            .find(|c| matches!(&c.action,render::Action::Open(target) if *target==id))
+            .unwrap();
+        assert!(control.contains(1700, y));
+        tap(&mut screen, 1700, y).unwrap();
+        assert_eq!(screen.selection.detail, Some(id));
+        let _ = std::fs::remove_dir_all(cache);
+    }
     #[test]
     fn native_without_web_renders_without_png_or_image_file_writes() {
         let mut config: crate::Config = crate::test_config();

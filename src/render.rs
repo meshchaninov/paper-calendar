@@ -187,18 +187,40 @@ pub struct SidebarLayout {
     pub agenda_end: i32,
     pub agenda_nav: i32,
 }
+pub const AGENDA_TITLE_LINES: usize = 5;
+pub const AGENDA_LINE_HEIGHT: i32 = 28;
+pub fn agenda_title_lines(event: &Event) -> Vec<String> {
+    let width = if event.all_day { 24 } else { 20 };
+    let mut lines = wrap(&event.title, width);
+    if lines.len() > AGENDA_TITLE_LINES {
+        lines.truncate(AGENDA_TITLE_LINES);
+        let last = lines.last_mut().unwrap();
+        *last = last
+            .chars()
+            .take(width - 1)
+            .collect::<String>()
+            .trim_end()
+            .to_owned()
+            + "…";
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+fn agenda_row_height(event: &Event) -> i32 {
+    (if event.all_day { 90 } else { 58 })
+        + (agenda_title_lines(event).len() as i32 - 1) * AGENDA_LINE_HEIGHT
+}
 pub fn sidebar_layout(events: &[Event], day: NaiveDate, tz: chrono_tz::Tz) -> SidebarLayout {
     let mut end = 128;
     let mut timed = false;
     for e in day_events(events, day, tz) {
-        end += if e.all_day {
-            90
-        } else if !timed {
+        end += agenda_row_height(e);
+        if !e.all_day && !timed {
+            end += 64;
             timed = true;
-            122
-        } else {
-            58
-        };
+        }
     }
     // Quiet day: tasks use about half the usable panel. Busy day: events may
     // grow to three quarters, keeping at least two comfortable task rows.
@@ -242,6 +264,20 @@ pub struct AgendaRow<'a> {
     pub event: &'a Event,
     pub y: i32,
     pub heading: bool,
+    pub height: i32,
+    pub lines: Vec<String>,
+}
+impl AgendaRow<'_> {
+    pub fn top(&self) -> i32 {
+        if self.event.all_day {
+            self.y
+        } else {
+            self.y - 28
+        }
+    }
+    pub fn hit_height(&self) -> i32 {
+        self.height - if self.event.all_day { 22 } else { 8 }
+    }
 }
 pub fn agenda_pages<'a>(
     events: &'a [Event],
@@ -254,31 +290,22 @@ pub fn agenda_pages<'a>(
     let mut timed_heading = false;
     for event in day_events(events, day, tz) {
         let mut heading = !event.all_day && !timed_heading;
-        let mut needed = if event.all_day {
-            90
-        } else if heading {
-            64 + 58
-        } else {
-            58
-        };
+        let height = agenda_row_height(event);
+        let mut needed = height + if heading { 64 } else { 0 };
         if y + needed > layout.agenda_end && !pages.last().unwrap().is_empty() {
             pages.push(Vec::new());
             y = 128;
             timed_heading = false;
             heading = !event.all_day;
-            needed = if event.all_day {
-                90
-            } else if heading {
-                122
-            } else {
-                58
-            };
+            needed = height + if heading { 64 } else { 0 };
         }
         let row_y = if heading { y + 64 } else { y };
         pages.last_mut().unwrap().push(AgendaRow {
             event,
             y: row_y,
             heading,
+            height,
+            lines: agenda_title_lines(event),
         });
         if !event.all_day {
             timed_heading = true;
@@ -611,20 +638,32 @@ pub fn svg(
         let layout = sidebar_layout(events, selected, tz);
         let pages = agenda_pages(events, selected, tz);
         let page = state.selection.agenda_page % pages.len();
-        for row in &pages[page] {
+        for (row_index, row) in pages[page].iter().enumerate() {
             let e = row.event;
             if e.all_day {
-                rect(&mut s, 1490, row.y, 338, 68, "#dddddd");
+                rect(&mut s, 1490, row.y, 338, row.hit_height(), "#dddddd");
+                write!(s,r#"<clipPath id="agenda-title-{row_index}"><rect x="1503" y="{}" width="312" height="{}"/></clipPath><g clip-path="url(#agenda-title-{row_index})">"#,row.y+3,row.lines.len() as i32*AGENDA_LINE_HEIGHT+2).unwrap();
+                for (i, line) in row.lines.iter().enumerate() {
+                    text(
+                        &mut s,
+                        1503,
+                        row.y + 27 + i as i32 * AGENDA_LINE_HEIGHT,
+                        23,
+                        "#111111",
+                        700,
+                        line,
+                    );
+                }
+                s.push_str("</g>");
                 text(
                     &mut s,
                     1503,
-                    row.y + 27,
-                    23,
-                    "#111111",
-                    700,
-                    &short(&e.title, 24),
+                    row.y + 52 + (row.lines.len() as i32 - 1) * AGENDA_LINE_HEIGHT,
+                    19,
+                    "#222222",
+                    400,
+                    "ВЕСЬ ДЕНЬ",
                 );
-                text(&mut s, 1503, row.y + 52, 19, "#222222", 400, "ВЕСЬ ДЕНЬ");
             } else {
                 if row.heading {
                     text(&mut s, 1490, row.y - 44, 20, "#333333", 700, "РАСПИСАНИЕ");
@@ -638,16 +677,25 @@ pub fn svg(
                     700,
                     &e.start.with_timezone(&tz).format("%H:%M").to_string(),
                 );
-                text(
+                write!(s,r#"<clipPath id="agenda-title-{row_index}"><rect x="1578" y="{}" width="250" height="{}"/></clipPath><g clip-path="url(#agenda-title-{row_index})">"#,row.y-23,row.lines.len() as i32*AGENDA_LINE_HEIGHT+2).unwrap();
+                for (i, line) in row.lines.iter().enumerate() {
+                    text(
+                        &mut s,
+                        1578,
+                        row.y + i as i32 * AGENDA_LINE_HEIGHT,
+                        22,
+                        "#111111",
+                        400,
+                        line,
+                    );
+                }
+                s.push_str("</g>");
+                rule(
                     &mut s,
-                    1578,
-                    row.y,
-                    22,
-                    "#111111",
-                    400,
-                    &short(&e.title, 20),
+                    1490,
+                    row.y + 19 + (row.lines.len() as i32 - 1) * AGENDA_LINE_HEIGHT,
+                    338,
                 );
-                rule(&mut s, 1490, row.y + 19, 338);
             }
         }
         if entries.is_empty() {
@@ -984,6 +1032,51 @@ pub fn raster(svg: &str, font_path: &std::path::Path) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn long_agenda_titles_wrap_to_five_lines_and_pages_do_not_overlap() {
+        let day = NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();
+        let tz = chrono_tz::Asia::Novosibirsk;
+        let mut template = crate::demo_events(day, tz)
+            .into_iter()
+            .find(|e| !e.task && !e.all_day && e.start.with_timezone(&tz).date_naive() == day)
+            .unwrap();
+        template.title =
+            "Обсуждение планов команды и подготовка большого проекта к следующему рабочему месяцу"
+                .into();
+        let lines = agenda_title_lines(&template);
+        assert_eq!(lines.len(), 5);
+        assert_eq!(lines.join(" "), template.title);
+        let original = template.title.clone();
+        template.title = original.repeat(5);
+        let lines = agenda_title_lines(&template);
+        assert_eq!(lines.len(), 5);
+        assert!(lines[4].ends_with('…'));
+        template.title = original;
+        let mut events = Vec::new();
+        for i in 0..20 {
+            let mut event = template.clone();
+            event.uid = format!("long-{i}");
+            event.start = template.start + Duration::minutes(i);
+            event.end = event.start + Duration::minutes(1);
+            events.push(event);
+        }
+        let mut all_day = template.clone();
+        all_day.uid = "all-day-long".into();
+        all_day.all_day = true;
+        events.push(all_day);
+        let pages = agenda_pages(&events, day, tz);
+        assert!(pages.len() > 1);
+        assert_eq!(pages.iter().map(Vec::len).sum::<usize>(), events.len());
+        let layout = sidebar_layout(&events, day, tz);
+        for page in &pages {
+            assert!(page.iter().all(
+                |row| row.lines.len() <= 5 && row.top() + row.hit_height() <= layout.agenda_end
+            ));
+            assert!(page
+                .windows(2)
+                .all(|pair| pair[0].top() + pair[0].hit_height() <= pair[1].top()));
+        }
+    }
     #[test]
     fn detail_pages_preserve_long_description_and_month() {
         let day = NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();
