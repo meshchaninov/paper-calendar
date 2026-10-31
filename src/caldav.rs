@@ -159,6 +159,12 @@ fn component(
     };
     ensure!(end >= start, "DTEND precedes DTSTART");
     Ok(Some(Event {
+        production_day: crate::production::classify(
+            source.production_calendar,
+            task,
+            all_day,
+            &unescape(value(props, "SUMMARY").unwrap_or("")),
+        ),
         uid: value(props, "UID").unwrap_or("").to_string(),
         title: unescape(value(props, "SUMMARY").unwrap_or("Без названия")).replace('\n', " "),
         description: unescape(value(props, "DESCRIPTION").unwrap_or("")).replace('\r', ""),

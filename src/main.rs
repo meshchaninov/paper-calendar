@@ -3,6 +3,7 @@ mod energy;
 #[cfg(feature = "pocketbook")]
 #[path = "native.rs"]
 mod pocketbook;
+mod production;
 mod render;
 mod task_sync;
 mod todo;
@@ -57,6 +58,8 @@ pub struct Config {
 }
 #[derive(Clone, Deserialize)]
 pub struct Calendar {
+    #[serde(default)]
+    pub production_calendar: bool,
     pub name: String,
     pub url: String,
     pub username_env: String,
@@ -66,6 +69,8 @@ pub struct Calendar {
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Event {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub production_day: Option<production::DayKind>,
     #[serde(default)]
     pub uid: String,
     pub title: String,
@@ -190,6 +195,7 @@ fn demo_events(today: NaiveDate, tz: chrono_tz::Tz) -> Vec<Event> {
             .unwrap()
             .with_timezone(&Utc);
         Event {
+            production_day: None,
             uid: format!("demo-{title}"),
             title: title.into(),
             description: demo_description(title),
@@ -225,6 +231,7 @@ fn demo_events(today: NaiveDate, tz: chrono_tz::Tz) -> Vec<Event> {
             .unwrap()
             .with_timezone(&Utc);
         events.push(Event {
+            production_day: None,
             uid: format!("demo-agenda-{hour}"),
             title: title.into(),
             description: demo_description(title),
@@ -264,6 +271,7 @@ fn demo_events(today: NaiveDate, tz: chrono_tz::Tz) -> Vec<Event> {
             .unwrap()
             .with_timezone(&Utc);
         events.push(Event {
+            production_day: None,
             uid: format!("demo-allday-{title}"),
             title: title.into(),
             description: demo_description(title),
@@ -334,6 +342,7 @@ async fn poll(config: Config, shared: Shared, demo: bool) -> Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Cache::default(),
         Err(e) => return Err(e.into()),
     };
+    production::apply_roles(&mut cache.events, &config);
     let mut last_attempt = 0i64;
     let mut fetched_month = None;
     let mut error = false;

@@ -141,7 +141,10 @@ pub fn task_page(events: &[Event], day: NaiveDate, page: usize, limit: usize) ->
 // Calendar preview rows. Every part of a cell selects its day; only the sidebar toggles tasks.
 fn cell_rows(events: &[Event], day: NaiveDate, tz: chrono_tz::Tz) -> Vec<&Event> {
     let agenda = day_events(events, day, tz);
-    let capacity = if agenda.iter().any(|e| e.all_day) {
+    let capacity = if agenda
+        .iter()
+        .any(|e| e.all_day && e.production_day.is_none())
+    {
         2
     } else {
         3
@@ -401,24 +404,29 @@ pub fn svg(
         let x = 36 + i as i32 * 199;
         if i >= 5 {
             rect(&mut s, x + 5, 81, 189, 44, "#111111");
-            text(&mut s, x + 17, 112, 26, "white", 700, label);
-            text(&mut s, x + 65, 110, 19, "white", 700, "выходной");
+            text(&mut s, x + 75, 112, 26, "white", 700, label);
         } else {
             text(&mut s, x + 14, 112, 26, "#111111", 700, label);
         }
     }
     let start = month_range(month).0;
     let days: Vec<_> = (0..42)
-        .map(|i| day_events(events, start + Duration::days(i), tz))
+        .map(|i| {
+            day_events(events, start + Duration::days(i), tz)
+                .into_iter()
+                .filter(|e| e.production_day.is_none())
+                .collect::<Vec<_>>()
+        })
         .collect();
     for i in 0..42 {
         let day = start + Duration::days(i as i64);
+        let production = crate::production::day_kind(events, day, tz);
         let x = 36 + (i % 7) * 199;
         let y = 130 + (i / 7) * 198;
-        let fill = if day.month() != month.month() {
+        let fill = if production.map_or(i % 7 >= 5, |kind| kind.is_day_off()) {
+            "#dedede"
+        } else if day.month() != month.month() {
             "#f6f6f6"
-        } else if i % 7 >= 5 {
-            "#eeeeee"
         } else {
             "white"
         };
@@ -452,6 +460,31 @@ pub fn svg(
             700,
             &format!("{:02}", day.day()),
         );
+        if let Some(kind) = production.filter(|kind| *kind != crate::production::DayKind::DayOff) {
+            let label = kind.label();
+            if kind.is_day_off() {
+                write!(
+                    s,
+                    r##"<rect x="{}" y="{}" width="119" height="30" rx="4" fill="#222222"/>"##,
+                    x + 8,
+                    y + 14
+                )
+                .unwrap();
+            }
+            text(
+                &mut s,
+                x + 13,
+                y + 36,
+                19,
+                if kind.is_day_off() {
+                    "white"
+                } else {
+                    "#111111"
+                },
+                700,
+                label,
+            );
+        }
         write!(s,r#"<clipPath id="cell{i}"><rect x="{}" y="{}" width="183" height="132"/></clipPath><g clip-path="url(#cell{i})">"#,x+8,y+64).unwrap();
         let entries = &days[i as usize];
         let all_day = entries.first().filter(|e| e.all_day);
@@ -591,7 +624,10 @@ pub fn svg(
         let day = start + Duration::days(index);
         let x = 36 + (index % 7) as i32 * 199;
         let y = 130 + (index / 7) as i32 * 198;
-        let base = if day_events(events, day, tz).iter().any(|e| e.all_day) {
+        let base = if day_events(events, day, tz)
+            .iter()
+            .any(|e| e.all_day && e.production_day.is_none())
+        {
             106
         } else {
             66
