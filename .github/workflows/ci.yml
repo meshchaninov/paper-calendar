@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install font and Rust toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fonts-dejavu-core
+          rustup toolchain install 1.97.0 --profile minimal --component rustfmt --component clippy
+      - name: Formatting
+        run: cargo fmt --all -- --check
+      - name: Lints
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: Unit tests
+        run: cargo test --locked --all-features
+      - name: Build web preview
+        run: cargo build --locked
+      - name: Calendar and interface integration
+        run: python3 -u tests/smoke.py
+      - name: Task synchronization integration
+        run: python3 -u tests/task_sync.py

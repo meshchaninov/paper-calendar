@@ -1,0 +1,25 @@
+{
+  "listen": "127.0.0.1:8080",
+  "timezone": "Asia/Novosibirsk",
+  "refresh_seconds": 3600,
+  "cache_dir": "cache",
+  "font_path": "/System/Library/Fonts/Supplemental/Arial.ttf",
+  "font_family": "Arial",
+  "calendars": [
+    {
+      "name": "Личный",
+      "url": "https://cloud.example.com/remote.php/dav/calendars/USERNAME/personal/",
+      "username_env": "CALDAV_USERNAME",
+      "password_env": "CALDAV_PASSWORD",
+      "tasks": true
+    }
+  ],
+  "power": {
+    "sleep_enabled": true,
+    "idle_seconds": 15,
+    "battery_refresh_seconds": 3600,
+    "wifi_on_demand": true,
+    "frontlight_off": true,
+    "full_refresh_after": 96
+  }
+}

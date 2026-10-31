@@ -1,0 +1,18 @@
+{
+  "listen": "127.0.0.1:18080",
+  "timezone": "Asia/Novosibirsk",
+  "refresh_seconds": 3600,
+  "cache_dir": "/mnt/ext1/applications/paper-calendar/cache",
+  "font_path": "/mnt/ext1/system/fonts/Sans_Regular.ttf",
+  "font_family": "PT Sans",
+  "calendars": [],
+  "web_enabled": false,
+  "power": {
+    "sleep_enabled": true,
+    "idle_seconds": 15,
+    "battery_refresh_seconds": 3600,
+    "wifi_on_demand": true,
+    "frontlight_off": true,
+    "full_refresh_after": 96
+  }
+}

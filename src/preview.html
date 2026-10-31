@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="ru">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Paper Calendar</title>
+<style>
+body{margin:0;background:#e9e9e9;font:16px system-ui;color:#555}
+main{max-width:1400px;margin:30px auto;padding:20px}
+.board{position:relative;line-height:0;box-shadow:0 4px 30px #0002;border-radius:4px;overflow:hidden}
+img{display:block;width:100%;height:auto}
+p{display:flex;justify-content:space-between;gap:20px}a{color:inherit}
+.task{position:absolute;background:transparent;border:0;border-radius:10px;cursor:pointer;touch-action:manipulation}
+.task:hover{background:#00000007}.task:focus-visible{outline:3px solid #222;outline-offset:-3px;background:#00000008}
+.task:disabled{cursor:wait}
+</style>
+<main>
+<p><span>Paper Calendar · PocketBook</span><span id="status" role="status">Загрузка…</span></p>
+<div class="board"><img id="screen" alt="Календарь месяца и список задач"><div id="tasks"></div></div>
+<p>Нажми на дату, чтобы открыть расписание дня. Нажми на задачу, чтобы поставить или снять галочку. Отметки сохраняются на этом устройстве.</p>
+<p><span>Предпросмотр экрана 1872 × 1404</span><a href="/calendar.png">Открыть PNG</a></p>
+</main>
+<script>
+let etag,updating=false;
+async function update(){
+ if(updating)return;updating=true;
+ try{
+  const r=await fetch('/calendar.png',{headers:etag?{'If-None-Match':etag}:{}});
+  if(r.status===200){
+   const blob=await r.blob();const img=document.getElementById('screen');const old=img.src;
+   img.src=URL.createObjectURL(blob);if(old.startsWith('blob:'))URL.revokeObjectURL(old);etag=r.headers.get('etag');
+  }
+  const tasks=await(await fetch('/tasks',{cache:'no-store'})).json();
+  const controls=await(await fetch('/controls',{cache:'no-store'})).json();
+  const focus=document.activeElement?.dataset?.id;
+  const layer=document.getElementById('tasks');layer.replaceChildren();
+  for(const task of tasks){
+   const button=document.createElement('button');button.className='task';button.dataset.id=task.id;
+   button.setAttribute('aria-label',task.title);button.setAttribute('aria-pressed',String(task.completed));
+   button.title=(task.completed?'Отметить невыполненной: ':'Выполнить: ')+task.title;
+   Object.assign(button.style,{left:100*task.x/1872+'%',top:100*task.y/1404+'%',width:100*task.width/1872+'%',height:100*task.height/1404+'%'});
+   button.onclick=async()=>{
+    button.disabled=true;
+    try{
+     const response=await fetch('/tasks/complete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:task.id,completed:!task.completed})});
+     if(!response.ok)throw Error('completion failed');await update();
+    }catch{document.getElementById('status').textContent='Не удалось сохранить отметку';button.disabled=false;}
+   };
+   layer.append(button);if(focus===task.id)button.focus({preventScroll:true});
+  }
+  for(const control of controls){
+   const button=document.createElement('button');button.className='task';button.setAttribute('aria-label',control.label);button.title=control.label;
+   Object.assign(button.style,{left:100*control.x/1872+'%',top:100*control.y/1404+'%',width:100*control.width/1872+'%',height:100*control.height/1404+'%'});
+   button.onclick=async()=>{button.disabled=true;try{const response=await fetch('/tap',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({x:control.x+control.width/2|0,y:control.y+control.height/2|0})});if(!response.ok)throw Error();await update();}catch{button.disabled=false;document.getElementById('status').textContent='Не удалось открыть день'}};
+   layer.append(button);
+  }
+  const s=await(await fetch('/status',{cache:'no-store'})).json();
+  document.getElementById('status').textContent=s.sync_error?'Ошибка синхронизации · сохранённые данные':s.last_success?'Синхронизация: '+new Date(s.last_success).toLocaleTimeString():'Ожидание данных';
+ }catch{document.getElementById('status').textContent='Нет связи с приложением'}finally{updating=false}
+}
+update();setInterval(update,30000);
+</script>
+</html>
