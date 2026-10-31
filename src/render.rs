@@ -368,6 +368,7 @@ pub fn svg(
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="1872" height="1404" viewBox="0 0 1872 1404"><rect width="1872" height="1404" fill="white"/><g font-family="{}">"#,
         escape(font)
     );
+    s.push_str(r#"<g id="calendar-base">"#);
     rect(&mut s, 36, 20, 200, 60, "#eeeeee");
     write!(
         s,
@@ -427,9 +428,6 @@ pub fn svg(
             r##"<path d="M{x} {y}h199v198" stroke="#aaaaaa" stroke-width="1.5" fill="none"/>"##
         )
         .unwrap();
-        if day == selected {
-            write!(s,r##"<rect x="{}" y="{}" width="195" height="194" rx="4" fill="none" stroke="#111111" stroke-width="2"/>"##,x+2,y+2).unwrap();
-        }
         if day == today {
             write!(
                 s,
@@ -468,23 +466,16 @@ pub fn svg(
             for (j, e) in rows.iter().enumerate() {
                 let ey = y + base + j as i32 * 38;
                 if e.task {
-                    let done = state.completed.contains(&e.task_id());
-                    write!(s,r##"<circle cx="{}" cy="{}" r="13" fill="{}" stroke="#111111" stroke-width="2"/>"##,x+23,ey+19,if done {"#111111"} else {"white"}).unwrap();
-                    if done {
-                        write!(s,r##"<path d="M{} {}l6 6 11-13" stroke="white" stroke-width="3" fill="none"/>"##,x+14,ey+19).unwrap();
-                    }
+                    write!(s,r##"<circle cx="{}" cy="{}" r="13" fill="white" stroke="#111111" stroke-width="2"/>"##,x+23,ey+19).unwrap();
                     text(
                         &mut s,
                         x + 43,
                         ey + 26,
                         21,
-                        if done { "#555555" } else { "#111111" },
+                        "#111111",
                         700,
                         &short(&e.title, 12),
                     );
-                    if done {
-                        rule(&mut s, x + 42, ey + 19, 143);
-                    }
                 } else {
                     text(
                         &mut s,
@@ -593,6 +584,33 @@ pub fn svg(
     }
     rule(&mut s, 36, 1318, 1393);
     write!(s, r##"<path d="M1455 30V1340" stroke="#bbbbbb"/>"##).unwrap();
+    s.push_str(r#"</g><g id="calendar-overlay">"#);
+    // Completion markers are overlays too: toggling a task must not reshape
+    // every label in the month. The underlying title remains crisp and legible.
+    for index in 0..42 {
+        let day = start + Duration::days(index);
+        let x = 36 + (index % 7) as i32 * 199;
+        let y = 130 + (index / 7) as i32 * 198;
+        let base = if day_events(events, day, tz).iter().any(|e| e.all_day) {
+            106
+        } else {
+            66
+        };
+        for (row, event) in cell_rows(events, day, tz).iter().enumerate() {
+            if event.task && state.completed.contains(&event.task_id()) {
+                let ey = y + base + row as i32 * 38;
+                write!(s,r##"<circle cx="{}" cy="{}" r="13" fill="#111111" stroke="#111111" stroke-width="2"/><path d="M{} {}l6 6 11-13" stroke="white" stroke-width="3" fill="none"/>"##,x+23,ey+19,x+14,ey+19).unwrap();
+                rule(&mut s, x + 42, ey + 19, 143);
+            }
+        }
+    }
+    let selected_index = (selected - start).num_days();
+    if (0..42).contains(&selected_index) {
+        let x = 36 + (selected_index % 7) * 199;
+        let y = 130 + (selected_index / 7) * 198;
+        write!(s,r##"<rect x="{}" y="{}" width="195" height="194" rx="4" fill="none" stroke="#111111" stroke-width="2"/>"##,x+2,y+2).unwrap();
+    }
+
     if let Some(event) = state
         .selection
         .detail
@@ -837,7 +855,7 @@ pub fn svg(
             "Нажми на дату для просмотра дня"
         },
     );
-    s.push_str("</g></svg>");
+    s.push_str("</g></g></svg>");
     s
 }
 pub const DETAIL_LINES: usize = 28;
@@ -989,7 +1007,7 @@ pub fn png_and_pixels(svg: &str, font_path: &std::path::Path) -> Result<(Vec<u8>
     .context("Restore image")?;
     Ok((pixmap.encode_png()?, rgba))
 }
-pub fn raster(svg: &str, font_path: &std::path::Path) -> Result<Vec<u8>> {
+fn raster_options(font_path: &std::path::Path) -> Result<resvg::usvg::Options<'static>> {
     use std::sync::{Arc, Mutex, OnceLock};
     type FontCache = Option<(std::path::PathBuf, Arc<resvg::usvg::fontdb::Database>)>;
     static FONTS: OnceLock<Mutex<FontCache>> = OnceLock::new();
@@ -1016,22 +1034,173 @@ pub fn raster(svg: &str, font_path: &std::path::Path) -> Result<Vec<u8>> {
         }
         Arc::clone(&cache.as_ref().unwrap().1)
     };
-    let options = resvg::usvg::Options {
+    Ok(resvg::usvg::Options {
         fontdb,
         ..resvg::usvg::Options::default()
-    };
-    let tree = resvg::usvg::Tree::from_str(svg, &options)?;
+    })
+}
+fn full_raster(svg: &str, options: &resvg::usvg::Options<'_>) -> Result<resvg::tiny_skia::Pixmap> {
+    let tree = resvg::usvg::Tree::from_str(svg, options)?;
     let mut pixmap = resvg::tiny_skia::Pixmap::new(1872, 1404).context("Allocate image")?;
     resvg::render(
         &tree,
         resvg::tiny_skia::Transform::default(),
         &mut pixmap.as_mut(),
     );
-    Ok(pixmap.take())
+    Ok(pixmap)
+}
+// Keep exactly one static month layer. Selection, day agenda, task pages and
+// status are transparent overlays, so browsing days does not reshape month text.
+fn svg_layers(svg: &str) -> Option<(String, String)> {
+    let (prefix, rest) = svg.split_once(r#"<g id="calendar-base">"#)?;
+    let (base, overlay) = rest.split_once(r#"</g><g id="calendar-overlay">"#)?;
+    let base = format!(r#"{prefix}<g id="calendar-base">{base}</g></g></svg>"#);
+    let transparent_prefix =
+        prefix.replacen(r#"<rect width="1872" height="1404" fill="white"/>"#, "", 1);
+    let overlay = format!(r#"{transparent_prefix}<g id="calendar-overlay">{overlay}"#);
+    Some((base, overlay))
+}
+pub fn raster(svg: &str, font_path: &std::path::Path) -> Result<Vec<u8>> {
+    use std::sync::{Arc, Mutex, OnceLock};
+    struct Layer {
+        path: std::path::PathBuf,
+        svg: String,
+        pixels: Arc<resvg::tiny_skia::Pixmap>,
+    }
+    static BASE: OnceLock<Mutex<Option<Layer>>> = OnceLock::new();
+    let options = raster_options(font_path)?;
+    let Some((base, overlay)) = svg_layers(svg) else {
+        return Ok(full_raster(svg, &options)?.take());
+    };
+    let pixels = {
+        let mut cached = BASE
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Month cache unavailable"))?;
+        if cached
+            .as_ref()
+            .is_none_or(|layer| layer.path != font_path || layer.svg != base)
+        {
+            let pixels = Arc::new(full_raster(&base, &options)?);
+            *cached = Some(Layer {
+                path: font_path.to_path_buf(),
+                svg: base,
+                pixels,
+            });
+        }
+        Arc::clone(&cached.as_ref().unwrap().pixels)
+    };
+    let overlay = full_raster(&overlay, &options)?;
+    let mut result = pixels.as_ref().clone();
+    // ARM soft-float blending must stay integer-only. A general bitmap
+    // transform/compositor needlessly runs floating-point work over the screen.
+    for (dst, src) in result
+        .data_mut()
+        .chunks_exact_mut(4)
+        .zip(overlay.data().chunks_exact(4))
+    {
+        match src[3] {
+            0 => {}
+            255 => dst.copy_from_slice(src),
+            alpha => {
+                let inverse = 255 - u32::from(alpha);
+                for channel in 0..3 {
+                    dst[channel] = (u32::from(src[channel])
+                        + (u32::from(dst[channel]) * inverse + 127) / 255)
+                        .min(255) as u8;
+                }
+                dst[3] = 255;
+            }
+        }
+    }
+    Ok(result.take())
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cached_month_is_independent_of_selection_and_composites_like_full_render() {
+        let config = crate::test_config();
+        let today = NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();
+        let events = crate::demo_events(today, config.timezone);
+        let completed = BTreeSet::new();
+        let hidden = BTreeSet::new();
+        let first = Selection::default();
+        let second = Selection {
+            day: NaiveDate::from_ymd_opt(2026, 10, 16),
+            ..Selection::default()
+        };
+        let image = |selection: &Selection, marks: &BTreeSet<String>| {
+            svg(
+                &events,
+                today,
+                config.timezone,
+                &config.font_family,
+                false,
+                true,
+                &RenderState {
+                    completed: marks,
+                    hidden_tasks: &hidden,
+                    pending_tasks: 0,
+                    selection,
+                },
+            )
+        };
+        let a = image(&first, &completed);
+        let b = image(&second, &completed);
+        let (base_a, overlay_a) = svg_layers(&a).unwrap();
+        let (base_b, overlay_b) = svg_layers(&b).unwrap();
+        assert_eq!(base_a, base_b);
+        assert_ne!(overlay_a, overlay_b);
+        let options = raster_options(&config.font_path).unwrap();
+        for svg in [&a, &b] {
+            let cached = raster(svg, &config.font_path).unwrap();
+            let full = full_raster(svg, &options).unwrap();
+            let max_delta = cached
+                .iter()
+                .zip(full.data())
+                .map(|(a, b)| a.abs_diff(*b))
+                .max()
+                .unwrap();
+            assert!(
+                max_delta <= 1,
+                "Layer composition changed pixels by {max_delta}"
+            );
+            assert!(cached.chunks_exact(4).all(|pixel| pixel[3] == 255));
+        }
+        let task = events
+            .iter()
+            .find(|e| e.task && e.task_date.is_some())
+            .unwrap();
+        let marks = BTreeSet::from([task.task_id()]);
+        let changed = image(&first, &marks);
+        assert_eq!(base_a, svg_layers(&changed).unwrap().0);
+        assert_ne!(overlay_a, svg_layers(&changed).unwrap().1);
+        let cached = raster(&changed, &config.font_path).unwrap();
+        let full = full_raster(&changed, &options).unwrap();
+        let max_delta = cached
+            .iter()
+            .zip(full.data())
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap();
+        // Overlapping antialiased marker edges can round by 2/255 when
+        // composited in two stages; larger changes would indicate a regression.
+        let changed_pixels = cached
+            .chunks_exact(4)
+            .zip(full.data().chunks_exact(4))
+            .filter(|(a, b)| a.iter().zip(b.iter()).any(|(a, b)| a.abs_diff(*b) > 1))
+            .count();
+        assert!(
+            max_delta <= 2,
+            "Completed marker delta {max_delta} in {changed_pixels} pixels"
+        );
+        let next = Selection {
+            month: NaiveDate::from_ymd_opt(2026, 11, 1),
+            ..Selection::default()
+        };
+        assert_ne!(base_a, svg_layers(&image(&next, &completed)).unwrap().0);
+    }
     #[test]
     fn long_agenda_titles_wrap_to_five_lines_and_pages_do_not_overlap() {
         let day = NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();

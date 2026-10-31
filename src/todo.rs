@@ -68,6 +68,23 @@ pub fn activity(screen: &mut Screen) {
     };
     screen.wake.notify_one();
 }
+pub fn next_display_deadline(screen: &Screen, scheduled: i64) -> i64 {
+    let next = screen
+        .completed_until
+        .values()
+        .copied()
+        .min()
+        .map_or(scheduled, |deadline| scheduled.min(deadline));
+    // The dashboard is already home; a touch there does not need an extra RTC
+    // wake solely to restore the same selection after thirty seconds.
+    if screen.selection == render::Selection::default() {
+        next
+    } else {
+        screen
+            .idle_until
+            .map_or(next, |deadline| next.min(deadline))
+    }
+}
 pub fn return_home_if_idle(screen: &mut Screen, now: i64) -> Result<()> {
     if !screen.idle_until.is_some_and(|deadline| now >= deadline) {
         return Ok(());
@@ -200,13 +217,14 @@ pub fn tasks(screen: &Screen) -> Vec<Task> {
 }
 pub fn set_completed(screen: &mut Screen, id: &str, completed: bool) -> Result<bool> {
     activity(screen);
-    if !screen
+    let Some(undated) = screen
         .view
         .as_ref()
-        .is_some_and(|v| v.events.iter().any(|e| e.task && e.task_id() == id))
-    {
+        .and_then(|v| v.events.iter().find(|e| e.task && e.task_id() == id))
+        .map(|e| e.task_date.is_none())
+    else {
         return Ok(false);
-    }
+    };
     if screen.completed.contains(id) == completed {
         return Ok(true);
     }
@@ -215,13 +233,15 @@ pub fn set_completed(screen: &mut Screen, id: &str, completed: bool) -> Result<b
     let old_outbox = screen.outbox.clone();
     if completed {
         screen.completed.insert(id.into());
-        let deadline = chrono::Utc::now().timestamp() + 30;
-        screen.completed_until.insert(id.into(), deadline);
-        screen.next_check = if screen.next_check == 0 {
-            deadline
-        } else {
-            screen.next_check.min(deadline)
-        };
+        if undated {
+            let deadline = chrono::Utc::now().timestamp() + 30;
+            screen.completed_until.insert(id.into(), deadline);
+            screen.next_check = if screen.next_check == 0 {
+                deadline
+            } else {
+                screen.next_check.min(deadline)
+            };
+        }
     } else {
         screen.completed.remove(id);
         screen.completed_until.remove(id);
@@ -570,6 +590,20 @@ pub async fn handle_tap(State(shared): State<Shared>, Json(body): Json<Tap>) -> 
 mod tests {
     use super::*;
     #[test]
+    fn dashboard_avoids_idle_wake_but_other_timers_are_preserved() {
+        let mut screen = Screen::default();
+        activity(&mut screen);
+        let idle = screen.idle_until.unwrap();
+        let hourly = idle + 3600;
+        assert_eq!(next_display_deadline(&screen, hourly), hourly);
+        screen.selection.day = chrono::NaiveDate::from_ymd_opt(2026, 10, 16);
+        assert_eq!(next_display_deadline(&screen, hourly), idle);
+        screen.selection = render::Selection::default();
+        screen.completed_until.insert("undated".into(), idle - 5);
+        assert_eq!(next_display_deadline(&screen, hourly), idle - 5);
+        assert_eq!(next_display_deadline(&screen, idle - 10), idle - 10);
+    }
+    #[test]
     fn last_line_of_wrapped_agenda_title_opens_the_correct_event() {
         let mut config = crate::test_config();
         let cache =
@@ -735,8 +769,8 @@ mod tests {
         assert!(screen.completed.contains(&first));
         tap(&mut screen, x, y).unwrap();
         assert!(screen.completed.contains(&first)); // Clicking the same calendar task cannot undo it.
-        let deadline = screen.completed_until[&first];
-        expire_completed(&mut screen, deadline).unwrap();
+        assert!(!screen.completed_until.contains_key(&first));
+        expire_completed(&mut screen, chrono::Utc::now().timestamp() + 31).unwrap();
         assert!(tasks(&screen).iter().any(|t| t.id == first && t.completed)); // Undo remains available on the right.
         let row = tasks(&screen).into_iter().find(|t| t.id == first).unwrap();
         tap(&mut screen, row.x + 20, row.y + 20).unwrap();

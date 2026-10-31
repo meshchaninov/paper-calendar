@@ -469,13 +469,7 @@ async fn poll(config: Config, shared: Shared, demo: bool) -> Result<()> {
         };
         let next = {
             let mut s = shared.write().await;
-            let next = s
-                .completed_until
-                .values()
-                .copied()
-                .min()
-                .map_or(next, |deadline| next.min(deadline));
-            let next = s.idle_until.map_or(next, |deadline| next.min(deadline));
+            let next = todo::next_display_deadline(&s, next);
             let next = if !demo && !s.outbox.is_empty() {
                 next.min(s.next_task_sync)
             } else {
