@@ -265,14 +265,15 @@ fn parse_report(
     }
     Ok(out)
 }
-async fn report(
+pub(crate) async fn report(
     client: &reqwest::Client,
     source: &Calendar,
     config: &Config,
     today: NaiveDate,
     tasks: bool,
+    range: Option<(NaiveDate, NaiveDate)>,
 ) -> Result<Vec<Event>> {
-    let (start, end) = month_range(today);
+    let (start, end) = range.unwrap_or_else(|| month_range(today));
     let utc = |d: NaiveDate| -> Result<String> {
         Ok(config
             .timezone
@@ -337,9 +338,13 @@ pub async fn fetch(
 ) -> Result<Vec<Event>> {
     let mut events = Vec::new();
     for source in &config.calendars {
-        events.extend(report(client, source, config, today, false).await?);
-        if source.tasks {
-            events.extend(report(client, source, config, today, true).await?);
+        if source.production_calendar {
+            events.extend(crate::production::fetch(client, source, config, today).await?);
+        } else {
+            events.extend(report(client, source, config, today, false, None).await?);
+            if source.tasks {
+                events.extend(report(client, source, config, today, true, None).await?);
+            }
         }
     }
     events.sort_by(|a, b| (a.start, &a.calendar, &a.title).cmp(&(b.start, &b.calendar, &b.title)));

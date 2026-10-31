@@ -71,9 +71,99 @@ pub fn day_kind(events: &[Event], day: NaiveDate, tz: chrono_tz::Tz) -> Option<D
             DayKind::Shortened => 3,
         })
 }
+// Fetch whole years so month navigation usually needs no subscription requests.
+const REFRESH_SECONDS: i64 = 30 * 24 * 60 * 60;
+const RETRY_SECONDS: i64 = 24 * 60 * 60;
+#[derive(Default, Serialize, Deserialize)]
+struct YearCache {
+    events: Vec<Event>,
+    last_success: Option<i64>,
+    last_attempt: Option<i64>,
+}
+impl YearCache {
+    fn due(&self, now: i64) -> bool {
+        self.last_success
+            .is_none_or(|t| now.saturating_sub(t) >= REFRESH_SECONDS)
+            && self
+                .last_attempt
+                .is_none_or(|t| now.saturating_sub(t) >= RETRY_SECONDS)
+    }
+}
+pub async fn fetch(
+    client: &reqwest::Client,
+    source: &crate::Calendar,
+    config: &Config,
+    month: NaiveDate,
+) -> anyhow::Result<Vec<Event>> {
+    use chrono::{Datelike, Utc};
+    use sha2::{Digest, Sha256};
+    let (from, to) = crate::month_range(month);
+    let dir = config.cache_dir.join("production");
+    std::fs::create_dir_all(&dir)?;
+    let key = format!(
+        "{:x}",
+        Sha256::digest(format!("{}\0{}\0{}", source.url, source.name, config.timezone).as_bytes())
+    );
+    let mut out = Vec::new();
+    for year in from.year()..=to.pred_opt().unwrap().year() {
+        let path = dir.join(format!("{key}-{year}.json"));
+        let mut cache: YearCache = match std::fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => YearCache::default(),
+            Err(e) => return Err(e.into()),
+        };
+        let now = Utc::now().timestamp();
+        if cache.due(now) {
+            let start = NaiveDate::from_ymd_opt(year, 1, 1)
+                .ok_or_else(|| anyhow::anyhow!("Invalid subscription year"))?;
+            let end = NaiveDate::from_ymd_opt(year + 1, 1, 1)
+                .ok_or_else(|| anyhow::anyhow!("Invalid subscription year"))?;
+            cache.last_attempt = Some(now);
+            match crate::caldav::report(client, source, config, month, false, Some((start, end)))
+                .await
+            {
+                Ok(events) => {
+                    cache.events = events;
+                    cache.last_success = Some(now);
+                }
+                Err(_) => eprintln!(
+                    "Production subscription unavailable; using saved days, retry in 24 hours"
+                ),
+            }
+            crate::atomic_write(&path, &serde_json::to_vec(&cache)?)?;
+        }
+        // Changing calendars or turning off the role must not leave stale metadata.
+        apply_roles(&mut cache.events, config);
+        out.extend(cache.events.into_iter().filter(|e| {
+            e.start.with_timezone(&config.timezone).date_naive() < to
+                && e.end.with_timezone(&config.timezone).date_naive() > from
+        }));
+    }
+    Ok(out)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn monthly_refresh_and_failure_backoff_survive_restart() {
+        let now = 2_000_000_000;
+        assert!(YearCache::default().due(now));
+        let cached = YearCache {
+            events: vec![],
+            last_success: Some(now),
+            last_attempt: Some(now),
+        };
+        let restored: YearCache =
+            serde_json::from_str(&serde_json::to_string(&cached).unwrap()).unwrap();
+        assert!(!restored.due(now + REFRESH_SECONDS - 1));
+        assert!(restored.due(now + REFRESH_SECONDS));
+        let failed = YearCache {
+            last_attempt: Some(now + REFRESH_SECONDS),
+            ..restored
+        };
+        assert!(!failed.due(now + REFRESH_SECONDS + RETRY_SECONDS - 1));
+        assert!(failed.due(now + REFRESH_SECONDS + RETRY_SECONDS));
+    }
     #[test]
     fn only_designated_all_day_events_classify() {
         for (title, expected) in [
