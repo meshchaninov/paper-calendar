@@ -317,6 +317,121 @@ pub fn agenda_pages<'a>(
     }
     pages
 }
+pub struct NextDayPreview<'a> {
+    pub day: NaiveDate,
+    pub heading_y: i32,
+    pub rows: Vec<AgendaRow<'a>>,
+    pub remaining: usize,
+    pub more_y: i32,
+}
+// Use only the spare space above tasks; never shrink today's schedule or tasks.
+pub fn next_day_preview(
+    events: &[Event],
+    day: NaiveDate,
+    tz: chrono_tz::Tz,
+) -> Option<NextDayPreview<'_>> {
+    let pages = agenda_pages(events, day, tz);
+    if pages.len() != 1 {
+        return None;
+    }
+    let layout = sidebar_layout(events, day, tz);
+    let used_end = pages[0].last().map_or(190, |row| row.y + row.height);
+    let next = day.succ_opt()?;
+    let entries = day_events(events, next, tz);
+    if entries.is_empty() {
+        return None;
+    }
+    let heading_y = used_end + 46;
+    let mut cursor = heading_y + 28;
+    let mut rows = Vec::new();
+    for (i, &event) in entries.iter().enumerate() {
+        let height = agenda_row_height(event);
+        let reserve = if i + 1 < entries.len() { 32 } else { 0 };
+        if cursor + height + reserve > layout.agenda_end {
+            break;
+        }
+        rows.push(AgendaRow {
+            event,
+            y: cursor + if event.all_day { 0 } else { 28 },
+            heading: false,
+            height,
+            lines: agenda_title_lines(event),
+        });
+        cursor += height;
+    }
+    if rows.is_empty() {
+        return None;
+    }
+    Some(NextDayPreview {
+        day: next,
+        heading_y,
+        remaining: entries.len() - rows.len(),
+        more_y: cursor + 24,
+        rows,
+    })
+}
+fn draw_agenda_rows(s: &mut String, rows: &[AgendaRow<'_>], tz: chrono_tz::Tz, prefix: &str) {
+    for (row_index, row) in rows.iter().enumerate() {
+        let e = row.event;
+        if e.all_day {
+            rect(s, 1490, row.y, 338, row.hit_height(), "#dddddd");
+            write!(s,r#"<clipPath id="agenda-title-{prefix}-{row_index}"><rect x="1503" y="{}" width="312" height="{}"/></clipPath><g clip-path="url(#agenda-title-{prefix}-{row_index})">"#,row.y+3,row.lines.len() as i32*AGENDA_LINE_HEIGHT+2).unwrap();
+            for (i, line) in row.lines.iter().enumerate() {
+                text(
+                    s,
+                    1503,
+                    row.y + 27 + i as i32 * AGENDA_LINE_HEIGHT,
+                    23,
+                    "#111111",
+                    700,
+                    line,
+                );
+            }
+            s.push_str("</g>");
+            text(
+                s,
+                1503,
+                row.y + 52 + (row.lines.len() as i32 - 1) * AGENDA_LINE_HEIGHT,
+                19,
+                "#222222",
+                400,
+                "ВЕСЬ ДЕНЬ",
+            );
+        } else {
+            if row.heading {
+                text(s, 1490, row.y - 44, 20, "#333333", 700, "РАСПИСАНИЕ");
+            }
+            text(
+                s,
+                1490,
+                row.y,
+                24,
+                "#111111",
+                700,
+                &e.start.with_timezone(&tz).format("%H:%M").to_string(),
+            );
+            write!(s,r#"<clipPath id="agenda-title-{prefix}-{row_index}"><rect x="1578" y="{}" width="250" height="{}"/></clipPath><g clip-path="url(#agenda-title-{prefix}-{row_index})">"#,row.y-23,row.lines.len() as i32*AGENDA_LINE_HEIGHT+2).unwrap();
+            for (i, line) in row.lines.iter().enumerate() {
+                text(
+                    s,
+                    1578,
+                    row.y + i as i32 * AGENDA_LINE_HEIGHT,
+                    22,
+                    "#111111",
+                    400,
+                    line,
+                );
+            }
+            s.push_str("</g>");
+            rule(
+                s,
+                1490,
+                row.y + 19 + (row.lines.len() as i32 - 1) * AGENDA_LINE_HEIGHT,
+                338,
+            );
+        }
+    }
+}
 fn escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -692,66 +807,7 @@ pub fn svg(
         let layout = sidebar_layout(events, selected, tz);
         let pages = agenda_pages(events, selected, tz);
         let page = state.selection.agenda_page % pages.len();
-        for (row_index, row) in pages[page].iter().enumerate() {
-            let e = row.event;
-            if e.all_day {
-                rect(&mut s, 1490, row.y, 338, row.hit_height(), "#dddddd");
-                write!(s,r#"<clipPath id="agenda-title-{row_index}"><rect x="1503" y="{}" width="312" height="{}"/></clipPath><g clip-path="url(#agenda-title-{row_index})">"#,row.y+3,row.lines.len() as i32*AGENDA_LINE_HEIGHT+2).unwrap();
-                for (i, line) in row.lines.iter().enumerate() {
-                    text(
-                        &mut s,
-                        1503,
-                        row.y + 27 + i as i32 * AGENDA_LINE_HEIGHT,
-                        23,
-                        "#111111",
-                        700,
-                        line,
-                    );
-                }
-                s.push_str("</g>");
-                text(
-                    &mut s,
-                    1503,
-                    row.y + 52 + (row.lines.len() as i32 - 1) * AGENDA_LINE_HEIGHT,
-                    19,
-                    "#222222",
-                    400,
-                    "ВЕСЬ ДЕНЬ",
-                );
-            } else {
-                if row.heading {
-                    text(&mut s, 1490, row.y - 44, 20, "#333333", 700, "РАСПИСАНИЕ");
-                }
-                text(
-                    &mut s,
-                    1490,
-                    row.y,
-                    24,
-                    "#111111",
-                    700,
-                    &e.start.with_timezone(&tz).format("%H:%M").to_string(),
-                );
-                write!(s,r#"<clipPath id="agenda-title-{row_index}"><rect x="1578" y="{}" width="250" height="{}"/></clipPath><g clip-path="url(#agenda-title-{row_index})">"#,row.y-23,row.lines.len() as i32*AGENDA_LINE_HEIGHT+2).unwrap();
-                for (i, line) in row.lines.iter().enumerate() {
-                    text(
-                        &mut s,
-                        1578,
-                        row.y + i as i32 * AGENDA_LINE_HEIGHT,
-                        22,
-                        "#111111",
-                        400,
-                        line,
-                    );
-                }
-                s.push_str("</g>");
-                rule(
-                    &mut s,
-                    1490,
-                    row.y + 19 + (row.lines.len() as i32 - 1) * AGENDA_LINE_HEIGHT,
-                    338,
-                );
-            }
-        }
+        draw_agenda_rows(&mut s, &pages[page], tz, "selected");
         if entries.is_empty() {
             text(&mut s, 1490, 170, 24, "#333333", 400, "Нет событий");
         }
@@ -767,6 +823,36 @@ pub fn svg(
             );
         }
         pager(&mut s, layout.agenda_nav, page, pages.len());
+        if let Some(preview) = next_day_preview(events, selected, tz) {
+            rule(&mut s, 1490, preview.heading_y - 32, 338);
+            let label = if Some(preview.day) == today.succ_opt() {
+                "Завтра"
+            } else {
+                "Следующий день"
+            };
+            text(
+                &mut s,
+                1490,
+                preview.heading_y,
+                23,
+                "#111111",
+                700,
+                &format!("{} · {}", label, preview.day.format("%d.%m")),
+            );
+            draw_agenda_rows(&mut s, &preview.rows, tz, "next");
+            if preview.remaining > 0 {
+                text(
+                    &mut s,
+                    1490,
+                    preview.more_y,
+                    20,
+                    "#333333",
+                    700,
+                    &format!("+ ещё {} · открыть день ›", preview.remaining),
+                );
+            }
+        }
+
         text(
             &mut s,
             1490,
@@ -1154,6 +1240,77 @@ pub fn raster(svg: &str, font_path: &std::path::Path) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn tomorrow_uses_spare_space_without_moving_tasks_and_limits_overflow() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 8).unwrap();
+        let tz = chrono_tz::Asia::Novosibirsk;
+        let template = crate::demo_events(today, tz)
+            .into_iter()
+            .find(|e| !e.task && !e.all_day && e.start.with_timezone(&tz).date_naive() == today)
+            .unwrap();
+        let mut events = vec![template.clone()];
+        events[0].title = "Обсудить планы".into();
+        for (i, title) in [
+            "Проверить документы",
+            "Встреча с командой",
+            "Подготовка отчёта по проекту",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let mut e = template.clone();
+            e.uid = format!("tomorrow-{i}");
+            e.title = title.to_string();
+            e.start += Duration::days(1) + Duration::hours(i as i64);
+            e.end = e.start + Duration::hours(1);
+            events.push(e);
+        }
+        let layout = sidebar_layout(&events, today, tz);
+        let preview = next_day_preview(&events, today, tz).unwrap();
+        assert_eq!(preview.day, today.succ_opt().unwrap());
+        assert_eq!(preview.rows.len(), 3);
+        assert_eq!(preview.remaining, 0);
+        assert_eq!(layout.task_limit, 5);
+        assert!(preview
+            .rows
+            .iter()
+            .all(|r| r.top() + r.hit_height() <= layout.agenda_end));
+        if let Some(path) = std::env::var_os("PAPER_CALENDAR_TOMORROW_PREVIEW") {
+            let config = crate::test_config();
+            let empty = BTreeSet::new();
+            let svg = svg(
+                &events,
+                today,
+                tz,
+                &config.font_family,
+                false,
+                false,
+                &RenderState {
+                    completed: &empty,
+                    hidden_tasks: &empty,
+                    pending_tasks: 0,
+                    selection: &Selection::default(),
+                },
+            );
+            std::fs::write(path, png(&svg, &config.font_path).unwrap()).unwrap();
+        }
+        for i in 0..20 {
+            let mut e = events[1].clone();
+            e.uid = format!("extra-{i}");
+            events.push(e);
+        }
+        let preview = next_day_preview(&events, today, tz).unwrap();
+        assert!(preview.remaining > 0);
+        assert_eq!(preview.remaining + preview.rows.len(), 23);
+        assert!(preview.more_y + 10 <= layout.agenda_end);
+        assert_eq!(sidebar_layout(&events, today, tz).task_top, layout.task_top);
+        for i in 0..25 {
+            let mut e = template.clone();
+            e.uid = format!("busy-today-{i}");
+            events.push(e);
+        }
+        assert!(next_day_preview(&events, today, tz).is_none());
+    }
     #[test]
     fn cached_month_is_independent_of_selection_and_composites_like_full_render() {
         let config = crate::test_config();

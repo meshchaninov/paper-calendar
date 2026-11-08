@@ -559,6 +559,40 @@ pub fn context_controls(screen: &Screen) -> Vec<render::Control> {
                 render::Action::Open(row.event.detail_id()),
             );
         }
+        if let Some(preview) = render::next_day_preview(&view.events, day, view.config.timezone) {
+            add(
+                "Открыть следующий день".into(),
+                1480,
+                preview.heading_y - 32,
+                356,
+                50,
+                render::Action::Day(preview.day),
+            );
+            for row in preview
+                .rows
+                .iter()
+                .filter(|r| !r.event.all_day && !r.event.task)
+            {
+                add(
+                    format!("Открыть: {}", row.event.title),
+                    1480,
+                    row.top(),
+                    356,
+                    row.hit_height(),
+                    render::Action::Open(row.event.detail_id()),
+                );
+            }
+            if preview.remaining > 0 {
+                add(
+                    "Все события следующего дня".into(),
+                    1480,
+                    preview.more_y - 22,
+                    356,
+                    32,
+                    render::Action::Day(preview.day),
+                );
+            }
+        }
     }
     out
 }
@@ -590,6 +624,55 @@ pub async fn handle_tap(State(shared): State<Shared>, Json(body): Json<Tap>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn tomorrow_event_opens_details_and_header_selects_next_day() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 8).unwrap();
+        let mut config = crate::test_config();
+        config.cache_dir =
+            std::env::temp_dir().join(format!("paper-calendar-tomorrow-{}", std::process::id()));
+        std::fs::create_dir_all(&config.cache_dir).unwrap();
+        let template = crate::demo_events(today, config.timezone)
+            .into_iter()
+            .find(|e| {
+                !e.task
+                    && !e.all_day
+                    && e.start.with_timezone(&config.timezone).date_naive() == today
+            })
+            .unwrap();
+        let mut next = template.clone();
+        next.uid = "tomorrow-detail".into();
+        next.start += chrono::Duration::days(1);
+        next.end += chrono::Duration::days(1);
+        let id = next.detail_id();
+        let mut screen = Screen {
+            native: true,
+            view: Some(crate::View {
+                events: vec![template, next],
+                today,
+                config,
+            }),
+            ..Screen::default()
+        };
+        let control = context_controls(&screen)
+            .into_iter()
+            .find(|c| matches!(&c.action, render::Action::Open(value) if value == &id))
+            .unwrap();
+        tap(&mut screen, control.x + 10, control.y + 10).unwrap();
+        assert_eq!(screen.selection.detail, Some(id));
+        let back = context_controls(&screen)
+            .into_iter()
+            .find(|c| matches!(c.action, render::Action::Back))
+            .unwrap();
+        tap(&mut screen, back.x + 10, back.y + 10).unwrap();
+        let header = context_controls(&screen)
+            .into_iter()
+            .find(|c| c.label == "Открыть следующий день")
+            .unwrap();
+        tap(&mut screen, header.x + 10, header.y + 10).unwrap();
+        assert_eq!(screen.selection.day, today.succ_opt());
+        assert_eq!(screen.metrics.sync_checks, 0);
+        let _ = std::fs::remove_dir_all(&screen.view.as_ref().unwrap().config.cache_dir);
+    }
     #[test]
     fn dashboard_avoids_idle_wake_but_other_timers_are_preserved() {
         let mut screen = Screen::default();
