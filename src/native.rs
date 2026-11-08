@@ -10,7 +10,7 @@ use std::{
     collections::VecDeque,
     ffi::{c_char, c_int, c_void},
     sync::{
-        atomic::{AtomicBool, AtomicI64, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
         Mutex, OnceLock,
     },
     time::{Instant, SystemTime},
@@ -93,6 +93,7 @@ struct Ui {
     pending_restore: AtomicBool,
     grace_until: AtomicI64,
     cooldown_until: AtomicI64,
+    sleep_failures: AtomicU64,
     previous_light: Mutex<Option<i32>>,
     previous_sleep: Mutex<Option<i32>>,
 }
@@ -319,7 +320,13 @@ extern "C" fn tick() {
         return;
     }
     if !ui.power.sleep_enabled || charging || ui.cooldown_until.load(Ordering::Relaxed) > time {
-        schedule(((next - time) * 1000).clamp(100, 5000) as i32);
+        let cooldown = ui.cooldown_until.load(Ordering::Relaxed);
+        let wait = if cooldown > time {
+            (cooldown - time).min(next - time)
+        } else {
+            next - time
+        };
+        schedule((wait * 1000).clamp(100, 60000) as i32);
         return;
     }
     if unsafe { IsTaskActive() == 0 || get_keylock() != 0 } {
@@ -353,7 +360,15 @@ extern "C" fn tick() {
         }
         if elapsed < 100 {
             s.metrics.sleep_refusals += 1;
-            ui.cooldown_until.store(now() + 5, Ordering::Relaxed);
+            ui.cooldown_until.store(
+                now()
+                    + energy::sleep_retry_seconds(
+                        ui.sleep_failures.fetch_add(1, Ordering::Relaxed) + 1,
+                    ),
+                Ordering::Relaxed,
+            );
+        } else {
+            ui.sleep_failures.store(0, Ordering::Relaxed);
         }
         s.wake.notify_one();
         let _ = crate::save_energy_report(&mut s);
@@ -518,6 +533,7 @@ pub fn run(shared: Shared, power: PowerConfig) -> Result<()> {
         pending_restore: AtomicBool::new(false),
         grace_until: AtomicI64::new(0),
         cooldown_until: AtomicI64::new(0),
+        sleep_failures: AtomicU64::new(0),
         previous_light: Mutex::new(None),
         previous_sleep: Mutex::new(None),
     })

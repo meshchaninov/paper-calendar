@@ -343,9 +343,36 @@ async fn poll(config: Config, shared: Shared, demo: bool) -> Result<()> {
         Err(e) => return Err(e.into()),
     };
     production::apply_roles(&mut cache.events, &config);
-    let mut last_attempt = 0i64;
-    let mut fetched_month = None;
-    let mut error = false;
+    let mut sync = if cache.last_success.is_some() {
+        energy::SyncState::load(&config.cache_dir)?
+    } else {
+        energy::SyncState::default()
+    };
+    let source_key = format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&(
+            config.timezone,
+            config
+                .calendars
+                .iter()
+                .map(|c| (
+                    &c.url,
+                    &c.name,
+                    &c.username_env,
+                    c.tasks,
+                    c.production_calendar
+                ))
+                .collect::<Vec<_>>()
+        ))?)
+    );
+    if sync.source_key != source_key {
+        sync = energy::SyncState {
+            source_key,
+            ..energy::SyncState::default()
+        };
+    }
+    cache.last_success = sync.last_success.or(cache.last_success);
+    let mut error = sync.failed;
     loop {
         let now = Utc::now().timestamp();
         let today = Utc::now().with_timezone(&config.timezone).date_naive();
@@ -370,11 +397,8 @@ async fn poll(config: Config, shared: Shared, demo: bool) -> Result<()> {
         } else {
             config.refresh_seconds
         };
-        let due = first
-            || manual
-            || (!demo && write_due)
-            || (!demo && (fetched_month != Some(month) || now >= last_attempt + interval as i64));
-        if due || changed_day {
+        let due = manual || (!demo && (write_due || sync.due(month, now, interval)));
+        if first || due || changed_day {
             {
                 let mut s = shared.write().await;
                 s.busy = true;
@@ -382,7 +406,7 @@ async fn poll(config: Config, shared: Shared, demo: bool) -> Result<()> {
                     s.metrics.manual_refreshes += 1;
                 }
             }
-            if first && !demo && !cache.events.is_empty() {
+            if first && due && !demo && !cache.events.is_empty() {
                 let mut s = shared.write().await;
                 s.view = Some(View {
                     events: cache.events.clone(),
@@ -394,7 +418,7 @@ async fn poll(config: Config, shared: Shared, demo: bool) -> Result<()> {
             }
             if demo {
                 cache.events = demo_events(today, config.timezone);
-            } else {
+            } else if due {
                 let manage_wifi = native && config.power.wifi_on_demand;
                 let attempted = shared.read().await.outbox.clone();
                 let connected = !manage_wifi || radio(&shared, true).await;
@@ -426,8 +450,8 @@ async fn poll(config: Config, shared: Shared, demo: bool) -> Result<()> {
                 if manage_wifi {
                     radio(&shared, false).await;
                 }
-                last_attempt = Utc::now().timestamp();
-                fetched_month = Some(month);
+                sync.last_attempt = Some(Utc::now().timestamp());
+                sync.month = Some(month);
                 let mut s = shared.write().await;
                 s.metrics.sync_checks += 1;
                 if !s.outbox.is_empty() {
@@ -435,8 +459,12 @@ async fn poll(config: Config, shared: Shared, demo: bool) -> Result<()> {
                         .outbox
                         .iter()
                         .any(|(id, change)| attempted.get(id) != Some(change));
-                    s.next_task_sync =
-                        Utc::now().timestamp() + if newer { 3 } else { interval as i64 };
+                    s.next_task_sync = Utc::now().timestamp()
+                        + if newer {
+                            config.power.task_sync_delay_seconds as i64
+                        } else {
+                            interval as i64
+                        };
                 }
                 match result {
                     Ok(events) => {
@@ -456,6 +484,9 @@ async fn poll(config: Config, shared: Shared, demo: bool) -> Result<()> {
                         eprintln!("CalDAV unavailable; retaining cached events");
                     }
                 }
+                sync.last_success = cache.last_success;
+                sync.failed = error;
+                sync.save(&config.cache_dir)?;
             }
             let mut s = shared.write().await;
             s.last_success = cache.last_success;
@@ -474,7 +505,7 @@ async fn poll(config: Config, shared: Shared, demo: bool) -> Result<()> {
         let next = if demo {
             midnight(&config)
         } else {
-            (last_attempt + interval as i64).min(midnight(&config))
+            sync.deadline(interval).min(midnight(&config))
         };
         let next = {
             let mut s = shared.write().await;
@@ -542,7 +573,9 @@ async fn main() -> Result<()> {
         "refresh_seconds must be at least 30"
     );
     anyhow::ensure!(
-        config.power.battery_refresh_seconds >= 30 && config.power.idle_seconds <= 3600,
+        config.power.battery_refresh_seconds >= 30
+            && config.power.idle_seconds <= 3600
+            && config.power.task_sync_delay_seconds <= 3600,
         "Invalid power configuration"
     );
     let demo = args.iter().any(|a| a == "--demo");

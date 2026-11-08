@@ -270,7 +270,8 @@ pub fn set_completed(screen: &mut Screen, id: &str, completed: bool) -> Result<b
                         completed,
                     },
                 );
-                screen.next_task_sync = chrono::Utc::now().timestamp() + 3;
+                screen.next_task_sync = chrono::Utc::now().timestamp()
+                    + view.config.power.task_sync_delay_seconds as i64;
             }
         }
     }

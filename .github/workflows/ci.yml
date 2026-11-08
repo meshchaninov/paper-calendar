@@ -32,3 +32,5 @@ jobs:
         run: python3 -u tests/task_sync.py
       - name: Production subscription cache integration
         run: python3 -u tests/production_sync.py
+      - name: Low-power sync integration
+        run: python3 -u tests/low_power.py

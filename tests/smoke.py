@@ -206,6 +206,10 @@ with tempfile.TemporaryDirectory() as tmp:
     finally:
         process.terminate(); process.wait(timeout=5)
     FAIL = True
+    sync_path = tmp/'cache/sync-state.json'
+    sync = json.loads(sync_path.read_text())
+    sync['last_attempt'] = 0
+    sync_path.write_text(json.dumps(sync))
     process = subprocess.Popen(command, env=env, stdout=subprocess.DEVNULL)
     try:
         status = wait_ready(base)

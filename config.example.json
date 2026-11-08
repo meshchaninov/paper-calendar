@@ -1,7 +1,7 @@
 {
   "listen": "127.0.0.1:8080",
   "timezone": "Asia/Novosibirsk",
-  "refresh_seconds": 3600,
+  "refresh_seconds": 43200,
   "cache_dir": "cache",
   "font_path": "/System/Library/Fonts/Supplemental/Arial.ttf",
   "font_family": "Arial",
@@ -16,10 +16,11 @@
   ],
   "power": {
     "sleep_enabled": true,
-    "idle_seconds": 15,
-    "battery_refresh_seconds": 3600,
+    "idle_seconds": 3,
+    "battery_refresh_seconds": 43200,
     "wifi_on_demand": true,
     "frontlight_off": true,
-    "full_refresh_after": 96
+    "full_refresh_after": 96,
+    "task_sync_delay_seconds": 30
   }
 }

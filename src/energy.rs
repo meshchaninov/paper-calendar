@@ -9,18 +9,55 @@ pub struct PowerConfig {
     pub wifi_on_demand: bool,
     pub frontlight_off: bool,
     pub full_refresh_after: u64,
+    pub task_sync_delay_seconds: u64,
 }
 impl Default for PowerConfig {
     fn default() -> Self {
         Self {
             sleep_enabled: true,
-            idle_seconds: 15,
-            battery_refresh_seconds: 3600,
+            idle_seconds: 3,
+            battery_refresh_seconds: 43200,
             wifi_on_demand: true,
             frontlight_off: true,
             full_refresh_after: 96,
+            task_sync_delay_seconds: 30,
         }
     }
+}
+// Separate scheduling metadata keeps an unchanged events.json untouched.
+#[derive(Default, Serialize, Deserialize)]
+pub struct SyncState {
+    #[serde(default)]
+    pub source_key: String,
+    pub last_attempt: Option<i64>,
+    pub last_success: Option<chrono::DateTime<chrono::Utc>>,
+    pub month: Option<chrono::NaiveDate>,
+    pub failed: bool,
+}
+impl SyncState {
+    pub fn due(&self, month: chrono::NaiveDate, now: i64, interval: u64) -> bool {
+        self.month != Some(month) || self.deadline(interval) <= now
+    }
+    pub fn deadline(&self, interval: u64) -> i64 {
+        self.last_attempt.map_or(0, |t| {
+            t.saturating_add(interval.min(i64::MAX as u64) as i64)
+        })
+    }
+    pub fn load(dir: &std::path::Path) -> anyhow::Result<Self> {
+        match std::fs::read(dir.join("sync-state.json")) {
+            Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(e.into()),
+        }
+    }
+    pub fn save(&self, dir: &std::path::Path) -> anyhow::Result<()> {
+        crate::atomic_write(&dir.join("sync-state.json"), &serde_json::to_vec(self)?)
+    }
+}
+// A refused sleep must not cause an endless five-second wake loop.
+#[cfg(any(feature = "pocketbook", test))]
+pub fn sleep_retry_seconds(refusals: u64) -> i64 {
+    (5i64 << refusals.saturating_sub(1).min(6)).min(300)
 }
 #[derive(Default, Serialize)]
 pub struct Metrics {
@@ -179,6 +216,31 @@ pub fn gray_bitmap(rgba: &[u8], width: usize, rect: Rect) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn scheduled_sync_stays_offline_through_midnight_and_restart() {
+        let month = chrono::NaiveDate::from_ymd_opt(2026, 11, 1).unwrap();
+        let state = SyncState {
+            last_attempt: Some(100_000),
+            month: Some(month),
+            ..SyncState::default()
+        };
+        let restored: SyncState =
+            serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+        assert!(!restored.due(month, 100_000 + 3600, 43200));
+        assert!(!restored.due(month, 143_199, 43200));
+        assert!(restored.due(month, 143_200, 43200));
+        assert_eq!(restored.deadline(43200), 143_200);
+        assert!(restored.due(month.succ_opt().unwrap(), 100_001, 43200));
+        assert!(SyncState::default().due(month, 100_000, 43200));
+    }
+    #[test]
+    fn refused_sleep_uses_bounded_backoff() {
+        assert_eq!(
+            (1..=8).map(sleep_retry_seconds).collect::<Vec<_>>(),
+            vec![5, 10, 20, 40, 80, 160, 300, 300]
+        );
+        assert_eq!(sleep_retry_seconds(u64::MAX), 300);
+    }
     #[test]
     fn bitmap_header_crop_gray_and_alpha_match_sdk_layout() {
         let rgba = vec![

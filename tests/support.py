@@ -5,6 +5,7 @@ from pathlib import Path
 
 def load_config(root):
     config = json.loads((root / 'config.example.json').read_text())
+    config['power']['task_sync_delay_seconds'] = 3
     override = os.environ.get('PAPER_CALENDAR_TEST_FONT')
     if override:
         config['font_path'] = override
